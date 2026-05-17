@@ -214,7 +214,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--cream);font-fa
     </svg>
   </div>
   <div class="app-name">Jigsaw</div>
-  <div class="app-tag">Enter your 4-digit PIN to continue</div>
+  <div class="app-tag" id="app-tag">Enter your 4-digit PIN to continue</div>
   <div class="pin-dots">
     <div class="dot" id="d0"></div><div class="dot" id="d1"></div>
     <div class="dot" id="d2"></div><div class="dot" id="d3"></div>
@@ -389,10 +389,10 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--cream);font-fa
     <div class="form-group">
       <label class="form-label" for="f-tpin">Transaction PIN</label>
       <div class="pw-toggle-row">
-        <input class="form-input" id="f-tpin" type="password" placeholder="e.g. 1234" autocomplete="new-password" inputmode="numeric" maxlength="10">
+        <input class="form-input" id="f-tpin" type="password" placeholder="e.g. 1234 or ABC123" autocomplete="new-password">
         <button class="pw-show-btn" onclick="togglePw('f-tpin')" type="button">👁</button>
       </div>
-      <div class="form-note">Card PIN or bank transfer authorisation code.</div>
+      <div class="form-note">Card PIN, bank transfer code, or any mix of letters and numbers.</div>
     </div>
     <div class="form-group">
       <label class="form-label" for="f-others">Others</label>
@@ -437,7 +437,20 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--cream);font-fa
   </div>
 
   <div class="settings-section">
-    <div class="settings-section-head">About</div>
+    <div class="settings-section-head">Security</div>
+    <div class="settings-card">
+      <div class="settings-row" onclick="changePIN()">
+        <div class="settings-row-icon">🔑</div>
+        <div class="settings-row-body">
+          <div class="settings-row-title">Change PIN</div>
+          <div class="settings-row-sub">Set a new 4-digit PIN</div>
+        </div>
+        <div class="settings-row-chev">›</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="settings-section">
     <div class="settings-card">
       <div class="settings-row" style="cursor:default;">
         <div class="settings-row-icon">🧩</div>
@@ -484,6 +497,20 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--cream);font-fa
   </div>
 </div>
 
+<!-- ══ PIN SETUP MODAL ══ -->
+<div class="modal-overlay" id="pin-setup-modal" style="align-items:center;">
+  <div class="modal-sheet" style="border-radius:22px;max-width:340px;margin:0 auto;">
+    <div class="modal-title" id="pin-setup-title">Create your PIN</div>
+    <div class="modal-body" id="pin-setup-body">Choose a 4-digit PIN to protect your Jigsaw.</div>
+    <div class="pin-dots" id="setup-dots" style="justify-content:center;margin:18px 0;">
+      <div class="dot" id="sd0"></div><div class="dot" id="sd1"></div>
+      <div class="dot" id="sd2"></div><div class="dot" id="sd3"></div>
+    </div>
+    <div class="numpad" id="setup-numpad" style="margin-bottom:14px;"></div>
+    <div class="pin-err" id="setup-err" style="text-align:center;min-height:18px;"></div>
+  </div>
+</div>
+
 <!-- Install banner -->
 <div id="ibanner">
   <button class="bn-x" onclick="closeBanner()">×</button>
@@ -497,9 +524,73 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--cream);font-fa
 // ══════════════════════════════════════
 //  CONFIG
 // ══════════════════════════════════════
-const PIN       = "2560";
+const PIN_KEY   = "jigsaw_pin";
 const STORE_KEY = "jigsaw_v3";
 const EXPORT_PREFIX = "JIGSAW-BACKUP-V1:";
+let PIN = "";
+try{ PIN = localStorage.getItem(PIN_KEY)||""; }catch(e){}
+
+function changePIN(){
+  setupStep="choose";setupFirst="";setupEntered="";
+  document.getElementById("pin-setup-title").textContent="Create new PIN";
+  document.getElementById("pin-setup-body").textContent="Choose a new 4-digit PIN.";
+  document.getElementById("setup-err").textContent="";
+  syncSetupDots();
+  // build pad only if not already built
+  if(!document.getElementById("setup-numpad").children.length) buildSetupPad();
+  document.getElementById("pin-setup-modal").classList.add("on");
+}
+
+// ── PIN SETUP ──────────────────────────────────────
+let setupStep="choose", setupFirst="", setupEntered="";
+function syncSetupDots(){for(let i=0;i<4;i++)document.getElementById("sd"+i).classList.toggle("on",i<setupEntered.length);}
+function buildSetupPad(){
+  const g=document.getElementById("setup-numpad");
+  [1,2,3,4,5,6,7,8,9,"",0,"⌫"].forEach(k=>{
+    const b=document.createElement("div");
+    b.className="nk"+(k===""?" ghost":"");
+    b.textContent=k;
+    if(k!=="")b.addEventListener("click",()=>setupTap(String(k)));
+    g.appendChild(b);
+  });
+}
+function setupTap(k){
+  const err=document.getElementById("setup-err");err.textContent="";
+  if(k==="⌫")setupEntered=setupEntered.slice(0,-1);
+  else if(setupEntered.length<4)setupEntered+=k;
+  syncSetupDots();
+  if(setupEntered.length===4){
+    setTimeout(()=>{
+      if(setupStep==="choose"){
+        setupFirst=setupEntered;setupEntered="";
+        setupStep="confirm";
+        document.getElementById("pin-setup-title").textContent="Confirm your PIN";
+        document.getElementById("pin-setup-body").textContent="Enter the same PIN again to confirm.";
+        syncSetupDots();
+      } else {
+        if(setupEntered===setupFirst){
+          try{localStorage.setItem(PIN_KEY,setupEntered);}catch(e){}
+          PIN=setupEntered;
+          document.getElementById("pin-setup-modal").classList.remove("on");
+          // now show regular PIN entry screen
+          document.getElementById("app-tag").textContent="Enter your 4-digit PIN to continue";
+        } else {
+          err.textContent="PINs don't match — please try again.";
+          setupEntered="";setupFirst="";setupStep="choose";
+          document.getElementById("pin-setup-title").textContent="Create your PIN";
+          document.getElementById("pin-setup-body").textContent="Choose a 4-digit PIN to protect your Jigsaw.";
+          syncSetupDots();
+        }
+      }
+    },100);
+  }
+}
+function maybeShowSetup(){
+  if(!PIN){
+    buildSetupPad();
+    document.getElementById("pin-setup-modal").classList.add("on");
+  }
+}
 
 const META = {
   v:{ name:"V",  sub:"Bank accounts",
@@ -872,7 +963,7 @@ if(isMob&&!isSA&&!nb)setTimeout(()=>document.getElementById("ibanner").classList
 // ══════════════════════════════════════
 //  INIT
 // ══════════════════════════════════════
-loadDB();buildPad();
+loadDB();buildPad();maybeShowSetup();
 </script>
 </body>
 </html>
