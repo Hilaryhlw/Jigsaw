@@ -221,7 +221,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--cream);font-fa
   </div>
   <div class="numpad" id="numpad"></div>
   <div class="pin-err" id="perr"></div>
-  <div class="pin-note">Locks automatically after 30 seconds of inactivity</div>
+  <div class="pin-note" id="pin-note-text">Locks automatically after inactivity</div>
 </div>
 
 <!-- ══ HOME ══ -->
@@ -447,6 +447,14 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--cream);font-fa
         </div>
         <div class="settings-row-chev">›</div>
       </div>
+      <div class="settings-row" onclick="showLockTimeoutModal()" style="align-items:center;">
+        <div class="settings-row-icon">⏱️</div>
+        <div class="settings-row-body">
+          <div class="settings-row-title">Auto-lock timeout</div>
+          <div class="settings-row-sub" id="lock-timeout-sub">Locks after 2 minutes of inactivity</div>
+        </div>
+        <div class="settings-row-chev">›</div>
+      </div>
     </div>
   </div>
 
@@ -516,6 +524,16 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--cream);font-fa
   <button class="bn-x" onclick="closeBanner()">×</button>
   <strong>Add Jigsaw to your home screen</strong>
   In Safari tap Share ↗ then <em>"Add to Home Screen"</em> — opens like a real app.
+</div>
+
+<!-- ══ LOCK TIMEOUT MODAL ══ -->
+<div class="modal-overlay" id="lock-timeout-modal">
+  <div class="modal-sheet">
+    <div class="modal-title">Auto-lock timeout</div>
+    <div class="modal-body">Choose how long Jigsaw waits before locking. The timer pauses while you are typing.</div>
+    <div id="lock-timeout-options" style="display:flex;flex-direction:column;gap:10px;margin-bottom:18px;"></div>
+    <button class="modal-cancel" onclick="closeModal('lock-timeout-modal')">Cancel</button>
+  </div>
 </div>
 
 </div><!-- #app -->
@@ -678,8 +696,60 @@ function loadDB(){
 function saveDB(){try{localStorage.setItem(STORE_KEY,JSON.stringify(DB));}catch(e){}}
 
 // ══════════════════════════════════════
+//  LOCK TIMEOUT CONFIG
+// ══════════════════════════════════════
+const LOCK_KEY = "jigsaw_lock_ms";
+const LOCK_OPTIONS = [
+  { label:"1 minute",  ms:60000  },
+  { label:"2 minutes", ms:120000 },
+  { label:"5 minutes", ms:300000 },
+  { label:"10 minutes",ms:600000 },
+  { label:"Never",     ms:0      },
+];
+let lockMs = 120000; // default 2 minutes
+try{ const s=localStorage.getItem(LOCK_KEY); if(s!==null) lockMs=parseInt(s,10); }catch(e){}
+
+function updateLockUI(){
+  const opt = LOCK_OPTIONS.find(o=>o.ms===lockMs) || LOCK_OPTIONS[1];
+  const sub = lockMs===0 ? "Auto-lock disabled" : "Locks after "+opt.label+" of inactivity";
+  const noteEl = document.getElementById("pin-note-text");
+  const subEl  = document.getElementById("lock-timeout-sub");
+  if(noteEl) noteEl.textContent = lockMs===0 ? "Auto-lock is disabled" : "Locks after "+opt.label+" of inactivity";
+  if(subEl)  subEl.textContent  = sub;
+}
+
+function showLockTimeoutModal(){
+  const container = document.getElementById("lock-timeout-options");
+  container.innerHTML="";
+  LOCK_OPTIONS.forEach(opt=>{
+    const btn = document.createElement("button");
+    const active = opt.ms===lockMs;
+    btn.textContent = (active?"✓  ":"")+opt.label;
+    btn.style.cssText="width:100%;border:"+(active?"2px solid var(--brand)":"1.5px solid var(--border)")+";border-radius:12px;padding:15px;font-size:16px;font-family:var(--sans);color:"+(active?"var(--brand)":"var(--ink)")+";background:var(--white);cursor:pointer;font-weight:"+(active?"500":"400")+";touch-action:manipulation;text-align:left;";
+    btn.onclick=()=>{
+      lockMs=opt.ms;
+      try{localStorage.setItem(LOCK_KEY,String(lockMs));}catch(e){}
+      updateLockUI();
+      resetLock();
+      closeModal("lock-timeout-modal");
+    };
+    container.appendChild(btn);
+  });
+  document.getElementById("lock-timeout-modal").classList.add("on");
+}
+
+// ══════════════════════════════════════
 //  ROUTING & LOCK
 // ══════════════════════════════════════
+// Track whether the user is actively typing in a form field
+let isTyping = false;
+document.addEventListener("focusin", e=>{
+  if(e.target.matches("input,textarea")){isTyping=true; clearTimeout(lockTimer);}
+});
+document.addEventListener("focusout", e=>{
+  if(e.target.matches("input,textarea")){isTyping=false; resetLock();}
+});
+
 function go(id){
   document.querySelectorAll(".screen").forEach(s=>s.classList.remove("on"));
   document.getElementById(id).classList.add("on");
@@ -688,7 +758,9 @@ function go(id){
 function resetLock(){
   clearTimeout(lockTimer);
   if(document.getElementById("s-pin").classList.contains("on"))return;
-  lockTimer=setTimeout(()=>{rv("pw",0);rv("tpin",0);entered="";syncDots();go("s-pin");},30000);
+  if(isTyping) return; // don't start timer while user is typing
+  if(lockMs===0) return; // auto-lock disabled
+  lockTimer=setTimeout(()=>{rv("pw",0);rv("tpin",0);entered="";syncDots();go("s-pin");}, lockMs);
 }
 document.addEventListener("touchstart",resetLock,{passive:true});
 document.addEventListener("mousedown",resetLock);
@@ -963,7 +1035,7 @@ if(isMob&&!isSA&&!nb)setTimeout(()=>document.getElementById("ibanner").classList
 // ══════════════════════════════════════
 //  INIT
 // ══════════════════════════════════════
-loadDB();buildPad();maybeShowSetup();
+loadDB();buildPad();maybeShowSetup();updateLockUI();
 </script>
 </body>
 </html>
