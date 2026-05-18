@@ -542,11 +542,82 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--cream);font-fa
 // ══════════════════════════════════════
 //  CONFIG
 // ══════════════════════════════════════
-const PIN_KEY   = "jigsaw_pin";
-const STORE_KEY = "jigsaw_v3";
-const EXPORT_PREFIX = "JIGSAW-BACKUP-V1:";
-let PIN = "";
-try{ PIN = localStorage.getItem(PIN_KEY)||""; }catch(e){}
+const PIN_KEY   = "jigsaw_pin_v2";   // v2 = hashed PIN
+const STORE_KEY = "jigsaw_v4";       // v4 = AES-encrypted store
+const EXPORT_PREFIX = "JIGSAW-BACKUP-V2:"; // v2 = encrypted export
+const LEGACY_STORE_KEY = "jigsaw_v3";
+const LEGACY_EXPORT_PREFIX = "JIGSAW-BACKUP-V1:";
+let PIN = "";       // raw PIN digits (held only in memory, never stored)
+let PIN_HASH = "";  // PBKDF2-derived hash stored in localStorage
+let CryptoKey_enc = null; // AES-GCM CryptoKey derived from PIN
+
+// ══════════════════════════════════════
+//  CRYPTO HELPERS (Web Crypto API)
+// ══════════════════════════════════════
+async function deriveKey(pin, saltHex){
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw", enc.encode(pin), {name:"PBKDF2"}, false, ["deriveKey","deriveBits"]
+  );
+  const salt = hexToBytes(saltHex);
+  return crypto.subtle.deriveKey(
+    {name:"PBKDF2", salt, iterations:200000, hash:"SHA-256"},
+    keyMaterial,
+    {name:"AES-GCM", length:256},
+    false,
+    ["encrypt","decrypt"]
+  );
+}
+
+async function deriveHash(pin, saltHex){
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw", enc.encode(pin), {name:"PBKDF2"}, false, ["deriveBits"]
+  );
+  const salt = hexToBytes(saltHex);
+  const bits = await crypto.subtle.deriveBits(
+    {name:"PBKDF2", salt, iterations:200000, hash:"SHA-256"},
+    keyMaterial, 256
+  );
+  return bytesToHex(new Uint8Array(bits));
+}
+
+async function encryptData(key, plaintext){
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const enc = new TextEncoder();
+  const ciphertext = await crypto.subtle.encrypt(
+    {name:"AES-GCM", iv}, key, enc.encode(plaintext)
+  );
+  return bytesToHex(iv) + ":" + bytesToHex(new Uint8Array(ciphertext));
+}
+
+async function decryptData(key, encStr){
+  const [ivHex, ctHex] = encStr.split(":");
+  const iv = hexToBytes(ivHex);
+  const ct = hexToBytes(ctHex);
+  const dec = new TextDecoder();
+  const plain = await crypto.subtle.decrypt({name:"AES-GCM", iv}, key, ct);
+  return dec.decode(plain);
+}
+
+function bytesToHex(bytes){ return Array.from(bytes).map(b=>b.toString(16).padStart(2,"0")).join(""); }
+function hexToBytes(hex){
+  const arr = new Uint8Array(hex.length/2);
+  for(let i=0;i<arr.length;i++) arr[i]=parseInt(hex.substr(i*2,2),16);
+  return arr;
+}
+function randomHex(bytes){ return bytesToHex(crypto.getRandomValues(new Uint8Array(bytes))); }
+
+// ══════════════════════════════════════
+//  PIN SALT (permanent per device)
+// ══════════════════════════════════════
+const SALT_KEY = "jigsaw_salt";
+let SALT_HEX = "";
+try{ SALT_HEX = localStorage.getItem(SALT_KEY)||""; }catch(e){}
+if(!SALT_HEX){ SALT_HEX = randomHex(32); try{localStorage.setItem(SALT_KEY,SALT_HEX);}catch(e){} }
+
+// Load stored PIN hash
+try{ PIN_HASH = localStorage.getItem(PIN_KEY)||""; }catch(e){}
 
 function changePIN(){
   setupStep="choose";setupFirst="";setupEntered="";
@@ -554,7 +625,6 @@ function changePIN(){
   document.getElementById("pin-setup-body").textContent="Choose a new 4-digit PIN.";
   document.getElementById("setup-err").textContent="";
   syncSetupDots();
-  // build pad only if not already built
   if(!document.getElementById("setup-numpad").children.length) buildSetupPad();
   document.getElementById("pin-setup-modal").classList.add("on");
 }
@@ -578,7 +648,7 @@ function setupTap(k){
   else if(setupEntered.length<4)setupEntered+=k;
   syncSetupDots();
   if(setupEntered.length===4){
-    setTimeout(()=>{
+    setTimeout(async ()=>{
       if(setupStep==="choose"){
         setupFirst=setupEntered;setupEntered="";
         setupStep="confirm";
@@ -587,11 +657,21 @@ function setupTap(k){
         syncSetupDots();
       } else {
         if(setupEntered===setupFirst){
-          try{localStorage.setItem(PIN_KEY,setupEntered);}catch(e){}
-          PIN=setupEntered;
+          const newPin = setupEntered;
+          // Re-encrypt existing data under new PIN if we have data
+          let oldDB = null;
+          if(CryptoKey_enc && Object.keys(DB).length){
+            oldDB = JSON.parse(JSON.stringify(DB));
+          }
+          PIN = newPin;
+          PIN_HASH = await deriveHash(PIN, SALT_HEX);
+          CryptoKey_enc = await deriveKey(PIN, SALT_HEX);
+          try{localStorage.setItem(PIN_KEY, PIN_HASH);}catch(e){}
+          if(oldDB){ await saveDB(); }
+          else { await loadDB(); } // loads defaults for new users
           document.getElementById("pin-setup-modal").classList.remove("on");
-          // now show regular PIN entry screen
           document.getElementById("app-tag").textContent="Enter your 4-digit PIN to continue";
+          go("s-home");
         } else {
           err.textContent="PINs don't match — please try again.";
           setupEntered="";setupFirst="";setupStep="choose";
@@ -604,7 +684,7 @@ function setupTap(k){
   }
 }
 function maybeShowSetup(){
-  if(!PIN){
+  if(!PIN_HASH){
     buildSetupPad();
     document.getElementById("pin-setup-modal").classList.add("on");
   }
@@ -689,11 +769,31 @@ let DB={};
 // ══════════════════════════════════════
 //  DB
 // ══════════════════════════════════════
-function loadDB(){
-  try{const r=localStorage.getItem(STORE_KEY);if(r){DB=JSON.parse(r);return;}}catch(e){}
-  DB=JSON.parse(JSON.stringify(DEFAULTS));saveDB();
+async function loadDB(){
+  // Try encrypted store first
+  try{
+    const r = localStorage.getItem(STORE_KEY);
+    if(r && CryptoKey_enc){
+      const plain = await decryptData(CryptoKey_enc, r);
+      DB = JSON.parse(plain);
+      return;
+    }
+  }catch(e){ console.warn("Decrypt failed, trying legacy",e); }
+  // Fall back to legacy unencrypted store (migration path)
+  try{
+    const r = localStorage.getItem(LEGACY_STORE_KEY);
+    if(r){ DB=JSON.parse(r); await saveDB(); localStorage.removeItem(LEGACY_STORE_KEY); return; }
+  }catch(e){}
+  DB=JSON.parse(JSON.stringify(DEFAULTS)); await saveDB();
 }
-function saveDB(){try{localStorage.setItem(STORE_KEY,JSON.stringify(DB));}catch(e){}}
+
+async function saveDB(){
+  if(!CryptoKey_enc) return;
+  try{
+    const enc = await encryptData(CryptoKey_enc, JSON.stringify(DB));
+    localStorage.setItem(STORE_KEY, enc);
+  }catch(e){ console.error("saveDB failed",e); }
+}
 
 // ══════════════════════════════════════
 //  LOCK TIMEOUT CONFIG
@@ -785,13 +885,18 @@ function tap(k){
   else if(entered.length<4)entered+=k;
   syncDots();
   if(entered.length===4){
-    setTimeout(()=>{
-      if(entered===PIN){go("s-home");}
-      else{
+    setTimeout(async ()=>{
+      const attemptHash = await deriveHash(entered, SALT_HEX);
+      if(attemptHash === PIN_HASH){
+        PIN = entered;
+        CryptoKey_enc = await deriveKey(PIN, SALT_HEX);
+        await loadDB();
+        go("s-home");
+      } else {
         err.textContent="Incorrect PIN — please try again.";
         const dots=document.querySelector(".pin-dots");
         ["-8px","8px","-5px","5px","0"].forEach((v,i)=>
-          setTimeout(()=>{dots.style.transform="translateX("+v+")"; },(i+1)*80));
+          setTimeout(()=>{dots.style.transform="translateX("+v+")";},(i+1)*80));
         setTimeout(()=>{entered="";syncDots();},500);
       }
     },100);
@@ -968,8 +1073,12 @@ document.querySelectorAll(".modal-overlay").forEach(el=>{
 // ══════════════════════════════════════
 //  EXPORT
 // ══════════════════════════════════════
-function showExportModal(){
-  const payload=EXPORT_PREFIX+btoa(unescape(encodeURIComponent(JSON.stringify(DB))));
+async function showExportModal(){
+  // Export salt + encrypted payload so it can be restored on another device
+  const exportSalt = randomHex(32);
+  const exportKey = await deriveKey(PIN, exportSalt);
+  const encPayload = await encryptData(exportKey, JSON.stringify(DB));
+  const payload = EXPORT_PREFIX + btoa(unescape(encodeURIComponent(JSON.stringify({s:exportSalt, d:encPayload}))));
   document.getElementById("export-box").textContent=payload;
   document.getElementById("copy-btn").textContent="Copy to clipboard";
   document.getElementById("export-modal").classList.add("on");
@@ -1001,23 +1110,45 @@ function showImportModal(){
 }
 function var_muted(){return getComputedStyle(document.documentElement).getPropertyValue("--muted").trim()||"#9e8878";}
 
-function doImport(){
+async function doImport(){
   const raw=document.getElementById("import-area").value.trim();
   const msg=document.getElementById("import-msg");
-  if(!raw.startsWith(EXPORT_PREFIX)){
-    msg.style.color="#b03030";msg.textContent="Invalid backup code — please check and try again.";return;
+
+  // ── New encrypted format ──────────────────────────────
+  if(raw.startsWith(EXPORT_PREFIX)){
+    try{
+      const json=decodeURIComponent(escape(atob(raw.slice(EXPORT_PREFIX.length))));
+      const parsed=JSON.parse(json);
+      if(!parsed.s||!parsed.d){throw new Error("bad structure");}
+      const importKey = await deriveKey(PIN, parsed.s);
+      const plain = await decryptData(importKey, parsed.d);
+      const db=JSON.parse(plain);
+      if(!db.v||!db.h||!db.y||!db.o){throw new Error("bad db structure");}
+      DB=db; await saveDB();
+      msg.style.color="#1b5e20";msg.textContent="✓ Imported successfully! Your accounts have been restored.";
+      setTimeout(()=>{closeModal("import-modal");go("s-home");},1800);
+    }catch(e){
+      msg.style.color="#b03030";msg.textContent="Could not read backup — the code may be incomplete, corrupted, or the PIN doesn't match.";
+    }
+    return;
   }
-  try{
-    const json=decodeURIComponent(escape(atob(raw.slice(EXPORT_PREFIX.length))));
-    const parsed=JSON.parse(json);
-    // validate structure
-    if(!parsed.v||!parsed.h||!parsed.y||!parsed.o){throw new Error("bad structure");}
-    DB=parsed;saveDB();
-    msg.style.color="#1b5e20";msg.textContent="✓ Imported successfully! Your accounts have been restored.";
-    setTimeout(()=>{closeModal("import-modal");go("s-home");},1800);
-  }catch(e){
-    msg.style.color="#b03030";msg.textContent="Could not read backup — the code may be incomplete or corrupted.";
+
+  // ── Legacy unencrypted format (V1) ───────────────────
+  if(raw.startsWith(LEGACY_EXPORT_PREFIX)){
+    try{
+      const json=decodeURIComponent(escape(atob(raw.slice(LEGACY_EXPORT_PREFIX.length))));
+      const parsed=JSON.parse(json);
+      if(!parsed.v||!parsed.h||!parsed.y||!parsed.o){throw new Error("bad structure");}
+      DB=parsed; await saveDB();
+      msg.style.color="#1b5e20";msg.textContent="✓ Old backup imported and now securely encrypted. Your accounts have been restored.";
+      setTimeout(()=>{closeModal("import-modal");go("s-home");},2200);
+    }catch(e){
+      msg.style.color="#b03030";msg.textContent="Could not read backup — the code may be incomplete or corrupted.";
+    }
+    return;
   }
+
+  msg.style.color="#b03030";msg.textContent="Invalid backup code — please check and try again.";
 }
 
 // ══════════════════════════════════════
@@ -1035,7 +1166,9 @@ if(isMob&&!isSA&&!nb)setTimeout(()=>document.getElementById("ibanner").classList
 // ══════════════════════════════════════
 //  INIT
 // ══════════════════════════════════════
-loadDB();buildPad();maybeShowSetup();updateLockUI();
+// On startup: DB loads only after PIN is verified (in tap())
+// If no PIN set yet, show setup; otherwise show PIN entry screen
+buildPad();maybeShowSetup();updateLockUI();
 </script>
 </body>
 </html>
